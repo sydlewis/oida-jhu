@@ -1,0 +1,287 @@
+---
+title: "INSYS Authorized Prescriptions"
+output: html_document
+---
+
+```{r}
+# downloads necessary packages
+library(tidyverse)
+library(readxl)
+```
+
+```{r}
+# pulls deduplicated spreadsheets
+folder_path_insys <- "~/hopkins/insys_full_dedup_July2024"
+
+# creates file papth to spreadsheets
+excel_files <- list.files(folder_path_insys, pattern = "\\.xls[xm]?$", full.names = TRUE)
+
+# creates function to check files for Page1_1 sheet
+check_file_for_sheet <- function(file) {
+  if (grepl("^~\\$", basename(file))) {
+    return(NULL)
+  }
+  
+  tryCatch({
+    if ("Page1_1" %in% excel_sheets(file)) {
+      return(basename(file))
+    }
+  }, error = function(e) {
+    cat("Error in processing file:", basename(file), "\n", sep = " ")
+    return(NULL)
+  })
+  
+  return(NULL)
+}
+
+# lists excel files with this pattern
+matching_files_authrx <- map(excel_files, check_file_for_sheet) |> 
+  compact()
+```
+
+```{r}
+# creates functions to read headers from relevant excel spreadsheets
+read_headers <- function(file_path) {
+  headers_tibble <- readxl::read_excel(file_path, sheet = "Page1_1", range = cell_rows(25), col_names = FALSE)
+  headers_vector <- as.vector(t(headers_tibble))
+  headers <- as.character(headers_vector)
+  return(headers)
+}
+
+create_header_id_unsorted <- function(headers) {
+  paste(headers, collapse = "_")
+}
+
+# creates function to process excel files, converting dates
+read_data <- function(file_path) {
+    data <- readxl::read_excel(file_path, sheet = "Page1_1", skip = 24, col_types = "text")
+    data <- data.frame(lapply(data, as.character), stringsAsFactors = FALSE)
+
+    if("Date.of.Service" %in% names(data)) {
+        # Convert numeric Excel date
+        data$`Date.of.Service` <- as.Date(as.numeric(data$`Date.of.Service`), origin = "1899-12-30")
+    }
+    
+    if("Processing.Date" %in% names(data)) {
+        data$`Processing.Date` <- as.POSIXct(as.numeric(data$`Processing.Date`)*86400, origin="1899-12-30", tz="UTC")
+    }
+
+    return(data)
+}
+```
+
+
+```{r}
+# creates new list with full excel file paths
+excel_files_full_paths <- paste0(folder_path_insys, "/", matching_files_authrx)
+
+# creates list with file headers
+file_headers <- map(excel_files_full_paths, read_headers)
+
+header_ids <- map(file_headers, create_header_id_unsorted)
+
+# creates list of file names
+file_names <- map_chr(excel_files_full_paths, basename)
+
+# creates dataframe summarizing the above information
+files_df <- tibble(file_name = file_names, file_path = excel_files_full_paths, header_id = header_ids)
+
+summary_list <- list()
+
+# modifies files_df dataframe
+files_df %>% 
+  group_by(header_id) %>%
+  do({
+    current_group <- .
+    
+    combined_data <- map_df(current_group$file_path, read_data)
+    
+    num_files <- nrow(current_group)
+    first_file_name <- gsub(".xlsx$", "", basename(current_group$file_path[1]))
+    data_frame_name <- sprintf("auth_rx_%d_%s", num_files, first_file_name)
+    
+    assign(data_frame_name, combined_data, envir = .GlobalEnv)
+    
+    summary_list[[data_frame_name]] <- list(
+      DataFrameName = data_frame_name,
+      NumFilesCombined = num_files,
+      FileNames = current_group$file_name
+    )
+  })
+
+# creates function to process and summarize files 
+process_and_summarize <- function(df) {
+  combined_data <- map_df(df$file_path, read_data)
+  
+  num_files <- nrow(df)
+  first_file_name <- gsub(".xlsx$", "", basename(df$file_path[1]))
+  data_frame_name <- sprintf("auth_rx_%d_%s", num_files, first_file_name)
+  
+  tibble(
+    DataFrameName = data_frame_name,
+    NumFilesCombined = num_files,
+    FileNames = df$file_name
+  )
+}
+
+# provides summary talbe of these files, grouped by headers
+summary_table <- files_df %>%
+  group_by(header_id) %>%
+  summarise(SummaryInfo = list(process_and_summarize(cur_data())), .groups = 'drop') %>%
+  unnest(SummaryInfo)
+
+# prints summary table
+print(summary_table)
+```
+
+```{r}
+# Create the vector of data frame names to be removed
+false_matches <- c("auth_rx_1_INSYS-MDL-009087636", "auth_rx_1_INSYS-MDL-009087644", 
+                   "auth_rx_1_INSYS-MDL-009087649", "auth_rx_1_INSYS-MDL-011728287", 
+                   "auth_rx_1_INSYS-MDL-011734309", "auth_rx_1_INSYS-MDL-011738775", 
+                   "auth_rx_1_INSYS-MDL-013641136..", "auth_rx_2_INSYS-MDL-009259800...xlsm", "auth_rx_28_INS-NY-00302442", "auth_rx_3_INSYS-MDL-009078035...xlsm")
+
+# Removes false matches
+rm(list = false_matches)
+
+# lists all objects in environment after removing these items
+all_objects <- ls()
+```
+
+```{r}
+library(data.table)
+
+# list names of all data frames starting with 'auth_rx'
+data_frame_names <- ls(pattern = "^auth_rx")
+
+# Convert list into data.tables
+data_frames_list <- lapply(mget(data_frame_names), as.data.table)
+
+# Define a function to change specific column names
+standardize_column_names <- function(df) {
+  new_names <- colnames(df)
+  
+  # Standardize column names
+  replacements <- list(
+    "Date of Service" = c("date.of.service"),
+    "Rx" = c("rx..", "Rx.."),
+    "Processing Date" = c("processing.date"),
+    "Status" = c("status"),
+    "NDC" = c("ndc"),
+    "Quantity Dispensed" = c("quantity.dispensed"),
+    "Days Supply" = c("days.supply"),
+    "IC" = c("i.c", "I_C", "I C", "I/C"),
+    "Pharmacy REMS ID" = c("pharmacy.rems.id"),
+    "Pharmacy Name" = c("pharmacy.name"),
+    "Prescriber REMS ID" = c("prescriber.rems.id"),
+    "Prescriber Last Name" = c("prescriber.last.name"),
+    "New/Repeat" = c("new.repeat", "...14"),
+    "Times on Subsys" = c("x..times.on.subsys"),
+    "Proc Rel" = c("proc_rel", "prc_rel", "Prc.Rl", "PROC"),
+    "Week ID" = c("WK.ID", "WK ID", "WK", "Week.."),
+    "Week Ending" = c("Wk.Ending", "WK Ending", "Week.Ending"),
+    "Territory" = c("terr", "TERR", "TERR..", "TERR.", "Territory..", "TERR.ID"),
+    "Territory Name" = c("TERR.NAME", "Territory.Name"),
+    "Region" = c("Region..", "Region"),
+    "SSP" = c("ssp", "SSP.NAME", "IC.SSP.ONLY"),
+    "DM" = c("dm"),
+    "FSD" = c("fsd"),
+    "WAC Revenue" = c("WAC.REVENUE"),
+    "Field Sales" = c("Field.Sales"),
+    "Unique Rxer" = c("Unique.Rxer"),
+    "Unique Rxer by WK" = c("Unique.Rxer.by.Wk"),
+    "Decile" = c("Decile"),
+    "Month" = c("Month"),
+    "Units" = c("Units"),
+    "REG" = c("REG..", "REG.NAME"),
+    "Quarter" = c("Quarter"),
+    "Q Rxer Count" = c("Q.Rxer.Count"),
+    "PDRP" = c("PDRP."),
+    "RSM" = c("RSM"),
+    "SSP Email" = c("SSP.Email"),
+    "RSM Email" = c("RSM.Email", "RSM.EMAIL"),
+    "Total Rejected Transactions" = c("Total.Number.of.Rejected.Transactions"),
+    "Flag" = c("Flag", "FLAG"),
+    "Flag Count" = c("Flag.Count", "FLAG.COUNTIF"),
+    "Patient ID" = c("Patient.ID", "Patient.ID")
+  )
+  
+  for (new_name in names(replacements)) {
+    old_names <- replacements[[new_name]]
+    new_names[tolower(new_names) %in% tolower(old_names)] <- new_name
+  }
+  
+  setnames(df, new_names)
+  return(df)
+}
+
+# Apply the function and create new data frames with modified names
+new_data_frames <- lapply(data_frames_list, standardize_column_names)
+
+# Names for the modified data frames, making sure they end with "_match" exactly
+new_names <- sapply(names(data_frames_list), function(name) {
+  if (grepl("_match$", name)) {
+    name  # Name already ends with "_match"
+  } else {
+    paste0(name, "_match")  # Append "_match" to the original name
+  }
+})
+
+# Assign the new data frames back to the global environment
+names(new_data_frames) <- new_names
+list2env(new_data_frames, envir = .GlobalEnv)
+
+# List all objects in the environment
+all_objects <- ls()
+
+# Identify data frames that do not end with '_match'
+non_match_data_frames <- all_objects[!grepl("_match$", all_objects)]
+
+# Remove these data frames from the environment
+rm(list = non_match_data_frames)
+gc()  # Run garbage collection to free up memory
+
+# List all objects in the environment again
+all_objects <- ls()
+
+# Ensure all objects are data.tables before combining
+data_tables_only <- all_objects[sapply(mget(all_objects), is.data.table)]
+```
+
+```{r}
+# Promote headers of selected data frames
+
+colnames(`auth_rx_10_INSYS-MDL-000111587...xlsm_match`) <- as.character(unlist(`auth_rx_10_INSYS-MDL-000111587...xlsm_match`[1,]))
+
+`auth_rx_10_INSYS-MDL-000111587...xlsm_match` <- `auth_rx_10_INSYS-MDL-000111587...xlsm_match`[-1, ]
+rownames(`auth_rx_10_INSYS-MDL-000111587...xlsm_match`) <- NULL
+
+`auth_rx_10_INSYS-MDL-000111587...xlsm_match`$`Date of Service` <- as.Date(as.numeric(`auth_rx_10_INSYS-MDL-000111587...xlsm_match`$`Date of Service`), origin = "1899-12-30")
+
+`auth_rx_10_INSYS-MDL-000111587...xlsm_match`$`Processing Date` <- as.POSIXct(as.numeric(`auth_rx_10_INSYS-MDL-000111587...xlsm_match`$`Processing Date`) * 86400, origin = "1899-12-30", tz = "UTC")
+```
+
+```{r}
+# Combine datasets using data.table's rbindlist
+combined_auth_rx_raw <- rbindlist(mget(data_tables_only), use.names = TRUE, fill = TRUE)
+```
+
+```{r}
+# further combines and streamlines other columns
+combined_auth_v1 <- combined_auth_rx_raw |>
+  select(where(~ !all(is.na(.)))) |>
+  mutate(
+    Region_Code = if_else(is.na(REG) & is.na(Region), NA_character_, paste(coalesce(REG, ""), coalesce(Region, ""), sep = " ")),
+    IC_1 = if_else(is.na(IC) & is.na(I_C), NA_character_, paste(coalesce(IC, ""), coalesce(I_C, ""), sep = " ")),
+    Territory_Code = if_else(is.na(TERR__) & is.na(Territory), NA_character_, paste(coalesce(TERR__, ""), coalesce(Territory, ""), sep = " ")),
+    Rx_Code = if_else(is.na(Rx) & is.na(Rx__), NA_character_, paste(coalesce(Rx, ""), coalesce(Rx__, ""), sep = " ")),
+    Week_Code = if_else(is.na(WK_ID) & is.na(Week_ID), NA_character_, paste(coalesce(WK_ID, ""), coalesce(Week_ID, ""), sep = " ")),
+    Week_Ending = if_else(is.na(Week_Ending) & is.na(Week_ID_1), NA_character_, paste(coalesce(Week_Ending, ""), coalesce(Week_ID_1, ""), sep = " ")),
+    Status_1 = if_else(is.na(Status) & is.na(X5_1_Status), NA_character_, paste(coalesce(Status, ""), coalesce(X5_1_Status, ""), sep = " "))
+  ) |>
+  select(-c("REG", "Region", "IC", "I_C", "TERR__", "Territory", "Rx", "Rx__", "WK_ID", "Week_ID", "Week_Ending", "Week_ID_1", "___19", "___21", "___13", "X26", "Status", "X5_1_Status")) |>
+  rename(Region_Name = REG_1,
+         Strength = STRENGTH,
+         IC = IC_1,
+         Status = Status_1)
+```

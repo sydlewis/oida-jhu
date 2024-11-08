@@ -1,0 +1,73 @@
+---
+title: "Authorized Prescription Trends in Quantities Dispensed"
+output: html_document
+---
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(plotly)
+library(htmlwidgets)
+
+auth_rx <- read_csv("auth_rx_combined_2024-08-07.csv")
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+auth_rx_quant <- auth_rx |> 
+  select(c(Date_of_Service, Quantity_Dispensed, Days_Supply)) |> 
+  mutate(quant_dispensed_cat = case_when(
+    Quantity_Dispensed < 10 ~ "Less than 10",
+    Quantity_Dispensed < 30 & Quantity_Dispensed >= 10 ~ "10 to 29",
+    Quantity_Dispensed < 60 & Quantity_Dispensed >= 30 ~ "30 to 59",
+    Quantity_Dispensed < 90 & Quantity_Dispensed >= 60 ~ "60 to 89",
+    Quantity_Dispensed < 120 & Quantity_Dispensed >= 90 ~ "90 to 119",
+    Quantity_Dispensed < 150 & Quantity_Dispensed >= 120 ~ "120 to 149",
+    Quantity_Dispensed < 200 & Quantity_Dispensed >= 150 ~ "150 to 199",
+    Quantity_Dispensed >= 200 ~ "200 or greater",
+    TRUE ~ NA
+  ),
+  days_supply_cat = case_when(
+    Days_Supply <= 7 ~ "7 or less",
+    Days_Supply < 14 & Days_Supply >= 8 ~ "8 to 13",
+    Days_Supply < 21 & Days_Supply >= 14 ~ "14 to 20",
+    Days_Supply < 30 & Days_Supply >= 21 ~ "21 to 30",
+    Days_Supply >= 31 ~ "31 or greater",
+    TRUE ~ NA
+  )) |> 
+  mutate(quant_dispensed_cat = fct_relevel(quant_dispensed_cat, 
+                                           "200 or greater", "150 to 199", "120 to 149", 
+                                           "90 to 119", "60 to 89", "30 to 59", 
+                                           "10 to 29", "Less than 10"),
+         days_supply_cat = fct_relevel(days_supply_cat,
+                                         "7 or less", "8 to 13", "14 to 20", "21 to 30", 
+                                         "31 or greater"))
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+library(scales)
+
+auth_rx_quant_filtered <- auth_rx_quant %>%
+  filter(!is.na(quant_dispensed_cat), !is.na(days_supply_cat))
+
+auth_rx_quant_filtered <- auth_rx_quant_filtered %>%
+  group_by(quant_dispensed_cat) %>%
+  mutate(total_count = sum(n())) %>%
+  ungroup()
+
+p <- ggplot(auth_rx_quant_filtered, aes(x = fct_rev(factor(quant_dispensed_cat)), fill = days_supply_cat)) +
+  geom_bar(position = "stack", stat = "count", aes(text = paste0(
+    "# of Transactions: ", after_stat(count), "\n",
+    "% of Transactions: ", scales::percent(after_stat(count) / tapply(after_stat(count), after_stat(x), sum)[after_stat(x)], accuracy = 1)
+  )), colour = "black", size = 0.25) +  # Add black outline
+  scale_y_continuous(labels = scales::comma) +  
+  labs(x = "Quantity Dispensed per Transaction", 
+       y = "Transactions", 
+       fill = "Days Supply Dispensed \n per Transaction") +
+  scale_fill_brewer(palette = "YlGnBu") + 
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+interactive_plot <- ggplotly(p, tooltip = "text")
+
+# Save the interactive plot as an HTML file
+saveWidget(interactive_plot, "interactive_plot.html")
+```
