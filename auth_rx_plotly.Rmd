@@ -66,6 +66,7 @@ p <- ggplot(auth_rx_quant_filtered, aes(x = fct_rev(factor(quant_dispensed_cat))
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
+# Creates interactive plot
 interactive_plot <- ggplotly(p, tooltip = "text")
 
 # Save the interactive plot as an HTML file
